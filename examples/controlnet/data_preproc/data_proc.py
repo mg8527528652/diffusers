@@ -2,7 +2,7 @@ import os
 import cv2
 import numpy as np
 import shutil
-
+from tqdm import tqdm
 def rename_files(data_folder_path, save_folder_path):
     '''
     inputs:
@@ -15,7 +15,7 @@ def rename_files(data_folder_path, save_folder_path):
     for subfolder in subfolders:
         subfolder_path = os.path.join(data_folder_path, subfolder)
         images = os.listdir(subfolder_path)
-        for image in images:
+        for image in tqdm(images):
             try:
                 image_path = os.path.join(subfolder_path, image)
                 new_image_path = os.path.join(save_folder_path, f"{subfolder}_{image}")
