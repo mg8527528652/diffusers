@@ -3,6 +3,9 @@ import cv2
 import numpy as np
 import shutil
 from tqdm import tqdm
+from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+
 def rename_files(data_folder_path, save_folder_path):
     '''
     inputs:
@@ -17,13 +20,14 @@ def rename_files(data_folder_path, save_folder_path):
         images = os.listdir(subfolder_path)
         for image in tqdm(images):
             try:
-                image_path = os.path.join(subfolder_path, image)
-                new_image_path = os.path.join(save_folder_path, f"{subfolder}_{image}")
-                shutil.copy(image_path, new_image_path)
+                # if image exists, continue 
+                if not os.path.exists(os.path.join(save_folder_path, f"{subfolder}_{image}")):
+                    image_path = os.path.join(subfolder_path, image)
+                    new_image_path = os.path.join(save_folder_path, f"{subfolder}_{image}")
+                    shutil.copy(image_path, new_image_path)
             except Exception as e:
                 print(f"Error processing image {image}: {e}")
                 continue
-
 
 def main_rename_files():
     images_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_masks"
@@ -40,5 +44,9 @@ def main_rename_files():
     rename_files(alpha_folder_path, save_alpha_folder_path)
     rename_files(images_folder_path, save_images_folder_path)
 
+
+
+
 if __name__ == "__main__":
     main_rename_files()
+    # get_data_from_hf()
