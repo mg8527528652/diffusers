@@ -1,7 +1,7 @@
 import os 
 import cv2
 import numpy as np
-
+import shutil
 
 def rename_files(data_folder_path, save_folder_path):
     '''
@@ -16,14 +16,29 @@ def rename_files(data_folder_path, save_folder_path):
         subfolder_path = os.path.join(data_folder_path, subfolder)
         images = os.listdir(subfolder_path)
         for image in images:
-            image_path = os.path.join(subfolder_path, image)
-            new_image_path = os.path.join(save_folder_path, f"{subfolder}_{image}")
-            os.rename(image_path, new_image_path)
+            try:
+                image_path = os.path.join(subfolder_path, image)
+                new_image_path = os.path.join(save_folder_path, f"{subfolder}_{image}")
+                shutil.copy(image_path, new_image_path)
+            except Exception as e:
+                print(f"Error processing image {image}: {e}")
+                continue
+
 
 def main_rename_files():
-    data_folder_path = "/Users/shreyas/Desktop/data"
-    save_folder_path = "/Users/shreyas/Desktop/data_renamed"
-    rename_files(data_folder_path, save_folder_path)
+    images_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_masks"
+    alpha_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_masks"
+
+    save_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_masks_renamed"
+    save_alpha_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_alphas_renamed"
+    save_images_folder_path = "/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_images_renamed"
+
+    os.makedirs(save_folder_path, exist_ok=True)
+    os.makedirs(save_alpha_folder_path, exist_ok=True)
+    os.makedirs(save_images_folder_path, exist_ok=True)
+
+    rename_files(alpha_folder_path, save_alpha_folder_path)
+    rename_files(images_folder_path, save_images_folder_path)
 
 if __name__ == "__main__":
     main_rename_files()
