@@ -85,8 +85,32 @@ def main_create_dataset():
     create_dataset(image_path, condition_image_path, prompt_json_path, save_path)
 
 
+def folder_diff(folder1, folder2):
+    # if folder1 is a path to txt, get file names from it, else get file names from folder1
+    if folder1.endswith(".txt"):
+        with open(folder1, "r") as f:
+            folder1_files = [line.strip() for line in f.readlines()]
+    else:
+        folder1_files = os.listdir(folder1)
+    if folder2.endswith(".txt"):
+        with open(folder2, "r") as f:
+            folder2_files = [line.strip() for line in f.readlines()]
+    else:
+        folder2_files = os.listdir(folder2)
+    
+    return set(folder1_files) - set(folder2_files)
+
+def remove_wrong_mask_files(txts_path, dataset_path):
+    folder_ids = [i.split(".")[0] for i in os.listdir(txts_path)]
+    for folder_id in folder_ids:
+        txt_path = os.path.join(txts_path, folder_id + ".txt")
+        folder_path = os.path.join(dataset_path, folder_id)
+        diff_files = folder_diff(txt_path, folder_path)
+        for file in diff_files:
+            # os.remove(os.path.join(folder_path, file))
+            print(file)
+
 
 if __name__ == "__main__":
     # main_rename_files()
     main_create_dataset() 
-       # get_data_from_hf()
