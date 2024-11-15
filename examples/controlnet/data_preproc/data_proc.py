@@ -97,27 +97,30 @@ def folder_diff(folder1, folder2):
             folder2_files = [line.strip() for line in f.readlines()]
     else:
         folder2_files = os.listdir(folder2)
-    
-    return set(folder1_files) - set(folder2_files)
+    folder1_files = [i.split(".")[0] for i in folder1_files]
+    folder2_files = [i.split(".")[0] for i in folder2_files]
+    return set(folder1_files) & set(folder2_files)
 
 def remove_wrong_mask_files(txts_path, dataset_path, save_path):
     folder_ids = [i.split(".")[0] for i in os.listdir(txts_path)]
     for folder_id in folder_ids:
         txt_path = os.path.join(txts_path, folder_id + ".txt")
         folder_path = os.path.join(dataset_path, folder_id)
-        diff_files = folder_diff(folder_path, txt_path)
-        for file in diff_files:
-            # shutil.move(os.path.join(folder_path, file), os.path.join(save_path, file))
-            # os.remove(os.path.join(folder_path, file))
+        common_files = folder_diff(folder_path, txt_path)
+        for file in common_files:
+            if save_path.endswith('images'):
+                shutil.copy(os.path.join(folder_path, file + ".jpg"), os.path.join(save_path, file + ".jpg"))
+            else:
+                shutil.copy(os.path.join(folder_path, file + ".png"), os.path.join(save_path, file + ".png"))
             print(file)
 
 
 if __name__ == "__main__":
     # main_rename_files()
-    txts_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/non yellow files-20241115T082555Z-001'
-    dataset_images_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_images_renamed'
-    dataset_alpha_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_alphas_renamed'
-    save_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_wrong_files'
+    txts_path = r'/home/ubuntu/Desktop/mayank_gaur/freepik/non_yellow_files'
+    dataset_images_path = r'/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_imgs'
+    dataset_alpha_path = r'/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_masks'
+    save_path = r'/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_wrong_files'
     os.makedirs(os.path.join(save_path, 'images'), exist_ok=True)
     os.makedirs(os.path.join(save_path, 'alphas'), exist_ok=True)
     remove_wrong_mask_files(txts_path, dataset_images_path, os.path.join(save_path, 'images'))
