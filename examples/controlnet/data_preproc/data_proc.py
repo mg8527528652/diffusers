@@ -100,17 +100,26 @@ def folder_diff(folder1, folder2):
     
     return set(folder1_files) - set(folder2_files)
 
-def remove_wrong_mask_files(txts_path, dataset_path):
+def remove_wrong_mask_files(txts_path, dataset_path, save_path):
     folder_ids = [i.split(".")[0] for i in os.listdir(txts_path)]
     for folder_id in folder_ids:
         txt_path = os.path.join(txts_path, folder_id + ".txt")
         folder_path = os.path.join(dataset_path, folder_id)
-        diff_files = folder_diff(txt_path, folder_path)
+        diff_files = folder_diff(folder_path, txt_path)
         for file in diff_files:
+            # shutil.move(os.path.join(folder_path, file), os.path.join(save_path, file))
             # os.remove(os.path.join(folder_path, file))
             print(file)
 
 
 if __name__ == "__main__":
     # main_rename_files()
-    main_create_dataset() 
+    txts_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/non yellow files-20241115T082555Z-001'
+    dataset_images_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_images_renamed'
+    dataset_alpha_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_alphas_renamed'
+    save_path = '/home/ubuntu/Desktop/mayank_gaur/freepik/freepik_wrong_files'
+    os.makedirs(os.path.join(save_path, 'images'), exist_ok=True)
+    os.makedirs(os.path.join(save_path, 'alphas'), exist_ok=True)
+    remove_wrong_mask_files(txts_path, dataset_images_path, os.path.join(save_path, 'images'))
+    remove_wrong_mask_files(txts_path, dataset_alpha_path, os.path.join(save_path, 'alphas'))
+    # main_create_dataset() 
