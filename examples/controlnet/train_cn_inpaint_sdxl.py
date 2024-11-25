@@ -315,7 +315,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=1024,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
@@ -346,7 +346,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=1000,
         help=(
             "Save a checkpoint of the training state every X updates. Checkpoints can be used for resuming training via `--resume_from_checkpoint`. "
             "In the case that the checkpoint is better than the final trained model, the checkpoint can also be used for inference."
@@ -358,7 +358,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=None,
+        default=20,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -384,7 +384,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--learning_rate",
         type=float,
-        default=5e-6,
+        default=1e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument(
@@ -418,7 +418,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
-        default=0,
+        default=8,
         help=(
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
@@ -465,7 +465,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default=None,
+        default="no",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -491,7 +491,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--dataset_name",
         type=str,
-        default='mg8272/bg_replacor_training_set',
+        default='mg8272/training_data',
         help=(
             "The name of the Dataset (from the HuggingFace hub) to train on (could be your own, possibly private,"
             " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
@@ -855,9 +855,9 @@ def collate_fn(examples):
         # dim[dim_min_ind] = int(ratio * image.shape[0:2][1-dim_min_ind])
         # dim = tuple(dim)
 
-        # resize image
-        image = resize_with_padding_cv2(image, (args.resolution, args.resolution))
-        mask = resize_with_padding_cv2(mask, (args.resolution, args.resolution))
+        # # resize image
+        # image = resize_with_padding_cv2(image, (args.resolution, args.resolution))
+        # mask = resize_with_padding_cv2(mask, (args.resolution, args.resolution))
         # max_x = image.shape[1] - 512
         # max_y = image.shape[0] - 512
         # x = np.random.randint(0, max_x)
@@ -906,6 +906,7 @@ def collate_fn(examples):
     conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
     conditioning_pixel_values = torch.stack(conditioning_images)
     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
+    masks = [conditioning_image_transforms(mask) for mask in masks]
     masks = torch.stack(masks)      
     masked_images = torch.stack(masked_images)
 
@@ -1198,7 +1199,7 @@ def main(args):
         # fingerprint used by the cache for the other processes to load the result
         # details: https://github.com/huggingface/diffusers/pull/4038#discussion_r1266078401
         new_fingerprint = Hasher.hash(args)
-        train_dataset = train_dataset.map(compute_embeddings_fn, batched=True, new_fingerprint=new_fingerprint)
+        train_dataset = train_dataset.map(compute_embeddings_fn, batched=True, batch_size=500, new_fingerprint=new_fingerprint)
 
     del text_encoders, tokenizers
     gc.collect()
