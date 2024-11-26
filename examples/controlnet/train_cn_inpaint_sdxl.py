@@ -283,7 +283,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--variant",
         type=str,
-        default=None,
+        default='fp16',
         help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
     parser.add_argument(
@@ -329,18 +329,18 @@ def parse_args(input_args=None):
     )
     parser.add_argument(
         "--crops_coords_top_left_w",
-        type=int,
+        type=int, 
         default=0,
         help=("Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."),
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=4 , help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
         "--max_train_steps",
         type=int,
-        default=70000,
+        default=100000,
         help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
     )
     parser.add_argument(
@@ -356,9 +356,8 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--checkpoints_total_limit",
-        type=int,
-        default=20,
+        "--checkpoints_total_limit", 
+        default=50,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -465,7 +464,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--mixed_precision",
         type=str,
-        default="no",
+        default="fp16",
         choices=["no", "fp16", "bf16"],
         help=(
             "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
@@ -576,7 +575,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--validation_steps",
         type=int,
-        default=100,
+        default=1000,
         help=(
             "Run validation every X steps. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`"
@@ -833,6 +832,40 @@ def resize_with_padding_cv2(img, expected_size):
 
 
 
+
+def resize_with_aspect_ratio(image, width=None, height=None):
+    """
+    Resize a PIL image maintaining aspect ratio to specified width or height.
+    At least one of width or height must be specified.
+    
+    Args:
+        image: PIL.Image object
+        width: Target width in pixels, or None
+        height: Target height in pixels, or None
+        
+    Returns:
+        PIL.Image: Resized image
+    """
+    if width is None and height is None:
+        raise ValueError("At least one of width or height must be specified")
+        
+    original_width, original_height = image.size
+    
+    if width is not None:
+        # Calculate height based on width
+        aspect_ratio = original_height / original_width
+        new_height = int(aspect_ratio * width)
+        new_width = width
+    else:
+        # Calculate width based on height
+        aspect_ratio = original_width / original_height
+        new_width = int(aspect_ratio * height)
+        new_height = height
+    
+    return image.resize((new_width, new_height), Image.LANCZOS)  # LANCZOS is the modern replacement for ANTIALIAS
+
+
+
 def collate_fn(examples):
 
     pixel_values = [example["pixel_values"].convert("RGB") for example in examples]
@@ -856,8 +889,10 @@ def collate_fn(examples):
         # dim = tuple(dim)
 
         # # resize image
-        # image = resize_with_padding_cv2(image, (args.resolution, args.resolution))
-        # mask = resize_with_padding_cv2(mask, (args.resolution, args.resolution))
+        # resize the max dimension to args.resolution. image is a PIL image
+        # resize image
+        image = resize_with_padding_cv2(image, (args.resolution, args.resolution))
+        mask = resize_with_padding_cv2(mask, (args.resolution, args.resolution))
         # max_x = image.shape[1] - 512
         # max_y = image.shape[0] - 512
         # x = np.random.randint(0, max_x)
@@ -869,6 +904,9 @@ def collate_fn(examples):
         # r= np.copy(image[:,:,0])
         # image[:,:,0] = image[:,:,2]
         # image[:,:,2] = r
+        # image = Image.fromarray(image)
+        # b, g, r = image.split()
+        # image = Image.merge("RGB", (r, g, b))
         image = Image.fromarray(image)
         # b, g, r = image.split()
         # image = Image.merge("RGB", (r, g, b))
@@ -879,10 +917,11 @@ def collate_fn(examples):
         masks.append(mask)
         masked_images.append(masked_image)
 
+
     image_transforms = transforms.Compose(
         [
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
+            # transforms.CenterCrop(args.resolution),
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),
         ]
@@ -891,7 +930,7 @@ def collate_fn(examples):
     conditioning_image_transforms = transforms.Compose(
         [
             transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.resolution),
+            # transforms.CenterCrop(args.resolution),
             transforms.ToTensor(),
         ]
     )
@@ -906,8 +945,7 @@ def collate_fn(examples):
     conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
     conditioning_pixel_values = torch.stack(conditioning_images)
     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
-    masks = [conditioning_image_transforms(mask) for mask in masks]
-    masks = torch.stack(masks)      
+    masks = torch.stack(masks)
     masked_images = torch.stack(masked_images)
 
     return {
@@ -919,7 +957,41 @@ def collate_fn(examples):
     }
 
 
+def save_image_tensor(image, path):
+    # Add batch dimension if not present
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+        
+    # Convert to normalized range [0,1]
+    image = (image / 2 + 0.5).clamp(0, 1)
     
+    # Convert to numpy and then uint8 format expected by PIL
+    image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
+    image = (image * 255).astype(np.uint8)
+    
+    # Handle single channel images
+    if image.shape[3] == 1:
+        image = image.squeeze(3)
+    
+    image = Image.fromarray(image[0])
+    
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    image.save(path)
+
+def save_image_tensor_batch(batch, save_dir):
+    for i in range(len(batch)):
+        save_image_tensor(batch[i], os.path.join(save_dir, f"{i}.png"))
+
+def save_batch_images(batch, save_dir): #batch is a dict with keys "pixel_values", "conditioning_pixel_values", "masks", "masked_images"
+    # value of this dict is a tensor of shape (batch_size, 3, 512, 512)
+    batch_size = len(batch["pixel_values"])
+    for i in range(batch_size):
+        save_image_tensor(batch["pixel_values"][i], os.path.join(save_dir, f"pixel_values_{i}.png"))
+        save_image_tensor(batch["conditioning_pixel_values"][i], os.path.join(save_dir, f"conditioning_pixel_values_{i}.png"))
+        save_image_tensor(batch["masks"][i], os.path.join(save_dir, f"masks_{i}.png"))
+        save_image_tensor(batch["masked_images"][i], os.path.join(save_dir, f"masked_images_{i}.png"))
+
+
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
         raise ValueError(
@@ -1317,138 +1389,146 @@ def main(args):
 
     image_logs = None
     for epoch in range(first_epoch, args.num_train_epochs):
-        for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet):
-                # Convert images to latent space
-                if args.pretrained_vae_model_name_or_path is not None:
-                    pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
-                else:
-                    pixel_values = batch["pixel_values"]
-                latents = vae.encode(pixel_values).latent_dist.sample()
-                latents = latents * vae.config.scaling_factor
-                # Convert masked images to latent space
-                masked_latents = vae.encode(
-                    batch["masked_images"].reshape(batch["pixel_values"].shape).to(dtype=weight_dtype)
-                ).latent_dist.sample()
-                masked_latents = masked_latents * vae.config.scaling_factor
-                masks = batch["masks"]
-                # resize the mask to latents shape as we concatenate the mask to the latents
-                mask = torch.stack(
-                    [
-                        torch.nn.functional.interpolate(mask, size=(args.resolution // 8, args.resolution // 8))
-                        for mask in masks
-                    ]
-                )
-                mask = mask.reshape(-1, 1, args.resolution // 8, args.resolution // 8)
+        try:
+            for step, batch in enumerate(train_dataloader):
+                try:
+                    with accelerator.accumulate(controlnet):
+                        # Convert images to latent space
+                        if args.pretrained_vae_model_name_or_path is not None:
+                            pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
+                            masked_images = batch["masked_images"].to(dtype=weight_dtype)
+                        else:
+                            pixel_values = batch["pixel_values"]
+                            masked_images = batch["masked_images"]
+                        latents = vae.encode(pixel_values).latent_dist.sample()
+                        latents = latents * vae.config.scaling_factor
+                        # Convert masked images to latent space
+                        masked_latents = vae.encode(
+                            masked_images.reshape(pixel_values.shape)
+                        ).latent_dist.sample()
+                        masked_latents = masked_latents * vae.config.scaling_factor
+                        masks = batch["masks"]
+                        # resize the mask to latents shape as we concatenate the mask to the latents
+                        mask = torch.stack(
+                            [
+                                torch.nn.functional.interpolate(mask, size=(args.resolution // 8, args.resolution // 8))
+                                for mask in masks
+                            ]
+                        )
+                        mask = mask.reshape(-1, 1, args.resolution // 8, args.resolution // 8)
 
 
-                # Sample noise that we'll add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
+                        # Sample noise that we'll add to the latents
+                        noise = torch.randn_like(latents)
+                        bsz = latents.shape[0]
 
-                # Sample a random timestep for each image
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                timesteps = timesteps.long()
+                        # Sample a random timestep for each image
+                        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                        timesteps = timesteps.long()
 
-                # Add noise to the latents according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(
-                    dtype=weight_dtype
-                )
-                # concatenate the noised latents with the mask and the masked latents
-                latent_model_input = torch.cat([noisy_latents, mask, masked_latents], dim=1)
+                        # Add noise to the latents according to the noise magnitude at each timestep
+                        # (this is the forward diffusion process)
+                        noisy_latents = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(
+                            dtype=weight_dtype
+                        )
+                        # concatenate the noised latents with the mask and the masked latents
+                        latent_model_input = torch.cat([noisy_latents.to(dtype=weight_dtype), mask.to(dtype=weight_dtype), masked_latents.to(dtype=weight_dtype)], dim=1)
 
-                # ControlNet conditioning.
-                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                down_block_res_samples, mid_block_res_sample = controlnet(
-                    latent_model_input,
-                    timesteps,
-                    encoder_hidden_states=batch["prompt_ids"],
-                    added_cond_kwargs=batch["unet_added_conditions"],
-                    controlnet_cond=controlnet_image,
-                    return_dict=False,
-                )
-
-                # Predict the noise residual
-                model_pred = unet(
-                    latent_model_input,
-                    timesteps,
-                    encoder_hidden_states=batch["prompt_ids"],
-                    added_cond_kwargs=batch["unet_added_conditions"],
-                    down_block_additional_residuals=[
-                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                    ],
-                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
-                    return_dict=False,
-                )[0]
-
-                # Get the target for loss depending on the prediction type
-                if noise_scheduler.config.prediction_type == "epsilon":
-                    target = noise
-                elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
-                else:
-                    raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
-
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    params_to_clip = controlnet.parameters()
-                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad(set_to_none=args.set_grads_to_none)
-
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                global_step += 1
-
-                # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
-                if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
-                        # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
-                        if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
-                            checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
-                            checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
-
-                            # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
-                            if len(checkpoints) >= args.checkpoints_total_limit:
-                                num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
-                                removing_checkpoints = checkpoints[0:num_to_remove]
-
-                                logger.info(
-                                    f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
-                                )
-                                logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
-
-                                for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
-                                    shutil.rmtree(removing_checkpoint)
-
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
-
-                    if args.validation_prompt is not None and global_step % args.validation_steps == 0:
-                        image_logs = log_validation(
-                            vae=vae,
-                            unet=unet,
-                            controlnet=controlnet,
-                            args=args,
-                            accelerator=accelerator,
-                            weight_dtype=weight_dtype,
-                            step=global_step,
+                        # ControlNet conditioning.
+                        controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
+                        down_block_res_samples, mid_block_res_sample = controlnet(
+                            latent_model_input,
+                            timesteps,
+                            encoder_hidden_states=batch["prompt_ids"],
+                            added_cond_kwargs=batch["unet_added_conditions"],
+                            controlnet_cond=controlnet_image,
+                            return_dict=False,
                         )
 
-            logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
-            progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
+                        # Predict the noise residual
+                        model_pred = unet(
+                            latent_model_input,
+                            timesteps,
+                            encoder_hidden_states=batch["prompt_ids"],
+                            added_cond_kwargs=batch["unet_added_conditions"],
+                            down_block_additional_residuals=[
+                                sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                            ],
+                            mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                            return_dict=False,
+                        )[0]
 
-            if global_step >= args.max_train_steps:
-                break
+                        # Get the target for loss depending on the prediction type
+                        if noise_scheduler.config.prediction_type == "epsilon":
+                            target = noise
+                        elif noise_scheduler.config.prediction_type == "v_prediction":
+                            target = noise_scheduler.get_velocity(latents, noise, timesteps)
+                        else:
+                            raise ValueError(f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+                        loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
+                        accelerator.backward(loss)
+                        if accelerator.sync_gradients:
+                            params_to_clip = controlnet.parameters()
+                            accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
+                        optimizer.step()
+                        lr_scheduler.step()
+                        optimizer.zero_grad(set_to_none=args.set_grads_to_none)
+                except Exception as e:
+                    print(e)
+                    continue
+                # Checks if the accelerator has performed an optimization step behind the scenes
+                if accelerator.sync_gradients:
+                    progress_bar.update(1)
+                    global_step += 1
+
+                    # DeepSpeed requires saving weights on every device; saving weights only on the main process would cause issues.
+                    if accelerator.distributed_type == DistributedType.DEEPSPEED or accelerator.is_main_process:
+                        if global_step % args.checkpointing_steps == 0:
+                            # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                            if args.checkpoints_total_limit is not None:
+                                checkpoints = os.listdir(args.output_dir)
+                                checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                                checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                                # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                                if len(checkpoints) >= args.checkpoints_total_limit:
+                                    num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                                    removing_checkpoints = checkpoints[0:num_to_remove]
+
+                                    logger.info(
+                                        f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                                    )
+                                    logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                                    for removing_checkpoint in removing_checkpoints:
+                                        removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                                        shutil.rmtree(removing_checkpoint)
+
+                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                            accelerator.save_state(save_path)
+                            logger.info(f"Saved state to {save_path}")
+
+                        if args.validation_prompt is not None and global_step % args.validation_steps == 0:
+                            image_logs = log_validation(
+                                vae=vae,
+                                unet=unet,
+                                controlnet=controlnet,
+                                args=args,
+                                accelerator=accelerator,
+                                weight_dtype=weight_dtype,
+                                step=global_step,
+                            )
+
+                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+                progress_bar.set_postfix(**logs)
+                accelerator.log(logs, step=global_step)
+
+                if global_step >= args.max_train_steps:
+                    break
+        except Exception as e:
+            print(e)
+            continue
     # Create the pipeline using using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
