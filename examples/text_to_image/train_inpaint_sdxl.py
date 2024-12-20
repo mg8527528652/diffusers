@@ -158,7 +158,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--variant",
         type=str,
-        default='fp16',
+        default=None,
         help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
     )
     parser.add_argument(
@@ -229,7 +229,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--proportion_empty_prompts",
         type=float,
-        default=0,
+        default=0.1,
         help="Proportion of image prompts to be replaced with empty strings. Defaults to 0 (no prompt replacement).",
     )
     parser.add_argument(
@@ -269,7 +269,7 @@ def parse_args(input_args=None):
         help="whether to randomly flip images horizontally",
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=1, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -281,7 +281,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
-        default=500,
+        default=1000,
         help=(
             "Save a checkpoint of the training state every X updates. These checkpoints can be used both as final"
             " checkpoints in case they are better than the last checkpoint, and are also suitable for resuming"
@@ -291,7 +291,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=None,
+        default=40,
         help=("Max number of checkpoints to store."),
     )
     parser.add_argument(
@@ -336,7 +336,7 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument(
         "--timestep_bias_strategy",
@@ -394,7 +394,7 @@ def parse_args(input_args=None):
         help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
         "More details here: https://arxiv.org/abs/2303.09556.",
     )
-    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument("--use_ema", default=False, help="Whether to use EMA model.")
     parser.add_argument(
         "--allow_tf32",
         action="store_true",
@@ -406,7 +406,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--dataloader_num_workers",
         type=int,
-        default=0,
+        default=16,
         help=(
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
@@ -469,7 +469,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
     )
-    parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
+    parser.add_argument("--noise_offset", type=float, default=0.0, help="The scale of noise offset.")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -679,6 +679,43 @@ def resize_with_padding_pil(img, expected_size):
     padded.paste(resized, (left, top))
     
     return padded
+
+
+def save_image_tensor(image, path):
+    # Add batch dimension if not present
+    if image.dim() == 3:
+        image = image.unsqueeze(0)
+        
+    # Convert to normalized range [0,1]
+    image = (image / 2 + 0.5).clamp(0, 1)
+    
+    # Convert to numpy and then uint8 format expected by PIL
+    image = image.detach().cpu().permute(0, 2, 3, 1).numpy()
+    image = (image * 255).astype(np.uint8)
+    
+    # Handle single channel images
+    if image.shape[3] == 1:
+        image = image.squeeze(3)
+    
+    image = Image.fromarray(image[0])
+    
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    image.save(path)
+
+def save_image_tensor_batch(batch, save_dir):
+    for i in range(len(batch)):
+        save_image_tensor(batch[i], os.path.join(save_dir, f"{i}.png"))
+
+def save_batch_images(batch, save_dir): #batch is a dict with keys "pixel_values", "conditioning_pixel_values", "masks", "masked_images"
+    # value of this dict is a tensor of shape (batch_size, 3, 512, 512)
+    batch_size = len(batch["pixel_values"])
+    for i in range(batch_size):
+        save_image_tensor(batch["pixel_values"][i], os.path.join(save_dir, f"pixel_values_{i}.png"))
+        # save_image_tensor(batch["conditioning_pixel_values"][i], os.path.join(save_dir, f"conditioning_pixel_values_{i}.png"))
+        save_image_tensor(batch["bg_masks"][i], os.path.join(save_dir, f"masks_{i}.png"))
+        save_image_tensor(batch["masked_images"][i], os.path.join(save_dir, f"masked_images_{i}.png"))
+
+
 
 def main(args):
     if args.report_to == "wandb" and args.hub_token is not None:
@@ -954,68 +991,17 @@ def main(args):
                 f"--caption_column' value '{args.caption_column}' needs to be one of: {', '.join(column_names)}"
             )
     def preprocess_train(examples):
-        images = []
-        fg_masks = []
-        bg_masks = []
-        original_sizes = []
-        crop_top_lefts = []
-        masked_images = []
-        
-        for idx in range(len(examples[image_column])):
-            try:
-                image = examples[image_column][idx].convert("RGB")
-                fg_mask = examples['condtioning_image'][idx].split()[-1].convert("RGB")
-                bg_mask = ImageOps.invert(fg_mask)
-                
-                # Store original size and crop info
-                original_sizes.append(image.size)
-                crop_top_lefts.append((0,0))
-                
-                # Resize images
-                w, h = image.size
-                if w > h:
-                    image = resize_with_padding_pil(image, (args.resolution, args.resolution))
-                    bg_mask = resize_with_padding_pil(bg_mask, (args.resolution, args.resolution))
-                else:
-                    image = resize_with_padding_pil(image, (args.resolution, args.resolution))
-                    bg_mask = resize_with_padding_pil(bg_mask, (args.resolution, args.resolution))
-                
-                # Prepare mask and masked image
-                bg_mask, masked_image = prepare_mask_and_masked_image(image, bg_mask)
-                
-                # Append to lists
-                images.append(image)
-                bg_masks.append(bg_mask)
-                masked_images.append(masked_image)
-                
-            except (OSError, IOError) as e:
-                logger.warning(f"Skipping corrupted image/mask at index {idx}: {str(e)}")
-                continue
-        
-        if len(images) == 0:
-            raise ValueError("All images in the batch were corrupted")
-            
-        image_transforms = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
-        
-        try:
-            pixel_values = [image_transforms(image) for image in images]
-            pixel_values = torch.stack(pixel_values)
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-            
-            examples["pixel_values"] = pixel_values
-            examples["masked_images"] = masked_images
-            examples["bg_masks"] = bg_masks
-            examples["original_sizes"] = original_sizes
-            examples["crop_top_lefts"] = crop_top_lefts
-            
-        except Exception as e:
-            logger.error(f"Error during image transformation: {str(e)}")
-            raise
-            
+        images = [image.convert("RGB") for image in examples[args.image_column]]
+        original_sizes = [(1024, 1024) for image in images]
+        conditioning_images = [image.convert("RGBA") for image in examples['condtioning_image']]
+        crop_top_lefts = [(0, 0) for image in images]
+        examples["pixel_values"] = images
+        examples["conditioning_pixel_values"] = conditioning_images
+        examples["original_sizes"] = original_sizes
+        examples["crop_top_lefts"] = crop_top_lefts
         return examples
+    
+    
     with accelerator.main_process_first():
         if args.max_train_samples is not None:
             dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
@@ -1033,46 +1019,97 @@ def main(args):
         proportion_empty_prompts=args.proportion_empty_prompts,
         caption_column=args.caption_column,
     )
-    compute_vae_encodings_fn = functools.partial(compute_vae_encodings, vae=vae)
+    # compute_vae_encodings_fn = functools.partial(compute_vae_encodings, vae=vae)
     with accelerator.main_process_first():
         from datasets.fingerprint import Hasher
 
         # fingerprint used by the cache for the other processes to load the result
         # details: https://github.com/huggingface/diffusers/pull/4038#discussion_r1266078401
         new_fingerprint = Hasher.hash(args)
-        new_fingerprint_for_vae = Hasher.hash(vae_path)
+        # new_fingerprint_for_vae = Hasher.hash(vae_path)
+        
+        # First process the embeddings
         train_dataset_with_embeddings = train_dataset.map(
-            compute_embeddings_fn, batched=True, batch_size=500,new_fingerprint=new_fingerprint
+            compute_embeddings_fn, 
+            batched=True, 
+            batch_size=args.train_batch_size,
+            new_fingerprint=new_fingerprint
         )
-        train_dataset_with_vae = train_dataset.map(
-            compute_vae_encodings_fn,
-            batched=True,
-            batch_size=500,
-            
-            new_fingerprint=new_fingerprint_for_vae,
-        )
-        precomputed_dataset = concatenate_datasets(
-            [train_dataset_with_embeddings, train_dataset_with_vae.remove_columns(["image", "text"])], axis=1
-        )
-        precomputed_dataset = precomputed_dataset.with_transform(preprocess_train)
+        
+    #     # Get the successful indices from embeddings processing
+    #     valid_indices = set(range(len(train_dataset_with_embeddings)))
+        
+    #     # Process VAE using only the valid indices
+    #     train_dataset_with_vae = train_dataset.select(list(valid_indices)).map(
+    #         compute_vae_encodings_fn,
+    #         batched=True,
+    #         batch_size=args.train_batch_size,
+    #         new_fingerprint=new_fingerprint_for_vae,
+    #     )
+        
+        # Now concatenate the datasets which should have matching lengths
+        # precomputed_dataset = concatenate_datasets(
+        #     [
+        #         train_dataset_with_embeddings.remove_columns(["image","condtioning_image", "text"]),
+        #         train_dataset
+        #     ], 
+        #     axis=1
+        # )
+        # precomputed_dataset = precomputed_dataset.with_transform(preprocess_train)
 
-    del compute_vae_encodings_fn, compute_embeddings_fn, text_encoder_one, text_encoder_two
-    del text_encoders, tokenizers, vae
-    gc.collect()
+    # del compute_vae_encodings_fn, compute_embeddings_fn, text_encoder_one, text_encoder_two
+    # del text_encoders, tokenizers, vae
+    # gc.collect()
     if is_torch_npu_available():
         torch_npu.npu.empty_cache()
     elif torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     def collate_fn(examples):
-        model_input = torch.stack([torch.tensor(example["model_input"]) for example in examples])
+        pixel_values = [example["pixel_values"].convert("RGB") for example in examples]
+        fg_masks = [example['conditioning_pixel_values'].split()[-1].convert("RGB") for example in examples]
+        bg_masks = [ImageOps.invert(example).convert("RGB") for example in fg_masks]
+        masked_images = []
+        
+        for i in range(len(pixel_values)):
+            w, h = pixel_values[i].size
+            # resize to 1k resolution
+            image = resize_with_padding_pil(pixel_values[i], (args.resolution, args.resolution))
+            fg_mask = resize_with_padding_pil(fg_masks[i], (args.resolution, args.resolution))
+            bg_mask = resize_with_padding_pil(bg_masks[i], (args.resolution, args.resolution))
+            # update pixel values with resized image
+            pixel_values[i] = image
+            # prepare normalized mask and masked image and append them
+            bg_mask, masked_image = prepare_mask_and_masked_image(pixel_values[i], bg_mask)
+            bg_masks[i] = bg_mask
+            
+            masked_images.append(masked_image)
+        # define transforms for pixel values and conditioning images
+        image_transforms = transforms.Compose(
+            [
+                # transforms.Resize(args.resolution, interpolation=transforms.InterpolationMode.BILINEAR),
+                # transforms.CenterCrop(args.resolution),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+        pixel_values = [image_transforms(image) for image in pixel_values]
+        pixel_values = torch.stack(pixel_values)
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+        bg_masks = torch.stack(bg_masks)
+        masked_images = torch.stack(masked_images)
+        
+        # model_input = torch.stack([torch.tensor(example["model_input"]) for example in examples])
         original_sizes = [example["original_sizes"] for example in examples]
         crop_top_lefts = [example["crop_top_lefts"] for example in examples]
         prompt_embeds = torch.stack([torch.tensor(example["prompt_embeds"]) for example in examples])
         pooled_prompt_embeds = torch.stack([torch.tensor(example["pooled_prompt_embeds"]) for example in examples])
 
         return {
-            "model_input": model_input,
+            "pixel_values": pixel_values,
+            "bg_masks": bg_masks,
+            "masked_images": masked_images,
             "prompt_embeds": prompt_embeds,
             "pooled_prompt_embeds": pooled_prompt_embeds,
             "original_sizes": original_sizes,
@@ -1081,7 +1118,7 @@ def main(args):
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
-        precomputed_dataset,
+        train_dataset_with_embeddings,
         shuffle=True,
         collate_fn=collate_fn,
         batch_size=args.train_batch_size,
@@ -1137,7 +1174,7 @@ def main(args):
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(precomputed_dataset)}")
+    logger.info(f"  Num examples = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -1165,7 +1202,7 @@ def main(args):
             initial_global_step = 0
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
+
             global_step = int(path.split("-")[1])
 
             initial_global_step = global_step
@@ -1186,33 +1223,54 @@ def main(args):
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                # Sample noise that we'll add to the latents
-                model_input = batch["model_input"].to(accelerator.device)
+                # Convert images to latent space
+                if args.pretrained_vae_model_name_or_path is not None:
+                    pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
+                    masked_images = batch["masked_images"].to(dtype=weight_dtype)
+                else:
+                    pixel_values = batch["pixel_values"]
+                    masked_images = batch["masked_images"]
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
+                # Convert masked images to latent space
+                masked_latents = vae.encode(
+                    masked_images.reshape(pixel_values.shape)
+                ).latent_dist.sample()
+                masked_latents = masked_latents * vae.config.scaling_factor
+                masks = batch["bg_masks"]
+                mask = torch.stack(
+                    [
+                        torch.nn.functional.interpolate(mask, size=(args.resolution // 8, args.resolution // 8))
+                        for mask in masks
+                    ]
+                )
+                mask = mask.reshape(-1, 1, args.resolution // 8, args.resolution // 8)
                 
-                noise = torch.randn_like(model_input)
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+                
                 if args.noise_offset:
                     # https://www.crosslabs.org//blog/diffusion-with-offset-noise
                     noise += args.noise_offset * torch.randn(
-                        (model_input.shape[0], model_input.shape[1], 1, 1), device=model_input.device
+                        (latents.shape[0], latents.shape[1], 1, 1), device=latents.device
                     )
 
-                bsz = model_input.shape[0]
                 if args.timestep_bias_strategy == "none":
                     # Sample a random timestep for each image without bias.
                     timesteps = torch.randint(
-                        0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
+                        0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device
                     )
                 else:
                     # Sample a random timestep for each image, potentially biased by the timestep weights.
                     # Biasing the timestep weights allows us to spend less time training irrelevant timesteps.
                     weights = generate_timestep_weights(args, noise_scheduler.config.num_train_timesteps).to(
-                        model_input.device
+                        latents.device
                     )
                     timesteps = torch.multinomial(weights, bsz, replacement=True).long()
 
                 # Add noise to the model input according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
-                noisy_model_input = noise_scheduler.add_noise(model_input, noise, timesteps).to(dtype=weight_dtype)
+                noisy_model_input = noise_scheduler.add_noise(latents.float(), noise.float(), timesteps).to(dtype=weight_dtype)
 
                 # time ids
                 def compute_time_ids(original_size, crops_coords_top_left):
@@ -1225,6 +1283,8 @@ def main(args):
                 add_time_ids = torch.cat(
                     [compute_time_ids(s, c) for s, c in zip(batch["original_sizes"], batch["crop_top_lefts"])]
                 )
+                save_batch_images(batch, 'r')
+                latent_model_input = torch.cat([noisy_model_input.to(dtype=weight_dtype), mask.to(dtype=weight_dtype), masked_latents.to(dtype=weight_dtype)], dim=1)
 
                 # Predict the noise residual
                 unet_added_conditions = {"time_ids": add_time_ids}
@@ -1232,7 +1292,7 @@ def main(args):
                 pooled_prompt_embeds = batch["pooled_prompt_embeds"].to(accelerator.device)
                 unet_added_conditions.update({"text_embeds": pooled_prompt_embeds})
                 model_pred = unet(
-                    noisy_model_input,
+                    latent_model_input,
                     timesteps,
                     prompt_embeds,
                     added_cond_kwargs=unet_added_conditions,
@@ -1247,10 +1307,10 @@ def main(args):
                 if noise_scheduler.config.prediction_type == "epsilon":
                     target = noise
                 elif noise_scheduler.config.prediction_type == "v_prediction":
-                    target = noise_scheduler.get_velocity(model_input, noise, timesteps)
+                    target = noise_scheduler.get_velocity(latents, noise, timesteps)
                 elif noise_scheduler.config.prediction_type == "sample":
                     # We set the target to latents here, but the model_pred will return the noise sample prediction.
-                    target = model_input
+                    target = latents
                     # We will have to subtract the noise residual from the prediction to get the target sample.
                     model_pred = model_pred - noise
                 else:

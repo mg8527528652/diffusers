@@ -180,3 +180,8 @@ wandb
 r/
 examples/controlnet/controlnet-model/
 examples/controlnet/r/
+r/
+text2image-fine-tune-sdxl/
+examples/text_to_image/r/
+examples/text_to_image/sdxl-model-finetuned/
+examples/text_to_image/sdxl-model-finetuned0v1/
